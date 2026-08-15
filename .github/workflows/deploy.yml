@@ -3,8 +3,6 @@ name: Deploy demo bucket
 on:
   push:
     branches: [main]
-    paths:
-      - "my-demo-bucket/**"
 
 permissions:
   id-token: write
@@ -23,8 +21,8 @@ jobs:
       - name: Assume role via OIDC
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ env.ROLE_ARN }}
-          aws-region: ${{ vars.ASSUME_ROLE_ARN }}
+          role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Sync to S3
         run: |
