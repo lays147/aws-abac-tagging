@@ -1,0 +1,34 @@
+name: Deploy demo bucket
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "my-demo-bucket/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ROLE_ARN: ${{ vars.ASSUME_ROLE_ARN }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assume role via OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3
+        run: |
+          aws s3 sync my-demo-bucket/ s3://github-actions-bucket/ \
+            --exclude "*.tf" \
+            --exclude "*.tfvars"
