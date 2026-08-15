@@ -12,7 +12,6 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  ROLE_ARN: ${{ vars.ASSUME_ROLE_ARN }}
 
 jobs:
   sync:
@@ -25,7 +24,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ vars.ASSUME_ROLE_ARN }}
 
       - name: Sync to S3
         run: |
