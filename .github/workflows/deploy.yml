@@ -26,6 +26,6 @@ jobs:
 
       - name: Sync to S3
         run: |
-          aws s3 sync my-demo-bucket/ s3://github-actions-bucket/ \
+          aws s3 sync my-demo-bucket/ s3://aws-abac-tagging-bucket/ \
             --exclude "*.tf" \
             --exclude "*.tfvars"
