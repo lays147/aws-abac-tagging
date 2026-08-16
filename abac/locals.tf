@@ -5,7 +5,11 @@ locals {
 
 
   github_org = "lays147"
-  reponame   = "repo:${local.github_org}/*"
+  # GitHub OIDC tokens append an immutable numeric ID to the org/repo names
+  # in the `sub` claim (e.g. repo:lays147@7799231/my-repo@123:ref:...), so the
+  # org segment needs a wildcard after the name to tolerate the optional
+  # "@<id>" suffix.
+  reponame = "repo:${local.github_org}*/*"
 
   tags = {
     "Environment" = terraform.workspace

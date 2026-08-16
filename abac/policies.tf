@@ -3,6 +3,9 @@
 # be compared directly against a resource tag using a StringLike policy
 # variable - matching the calling repository's name against the bucket's
 # Application tag without needing a second role or session tags.
+# Both the org and repo name segments carry a wildcard suffix because GitHub
+# appends an immutable numeric ID to each (e.g.
+# repo:lays147@7799231/my-repo@123:ref:...).
 data "aws_iam_policy_document" "s3_sync" {
   statement {
     sid    = "SyncObjects"
@@ -16,7 +19,7 @@ data "aws_iam_policy_document" "s3_sync" {
     condition {
       test     = "StringLike"
       variable = "${local.github_oidc_domain}:sub"
-      values   = ["repo:${local.github_org}/$${aws:ResourceTag/Application}:*"]
+      values   = ["repo:${local.github_org}*/$${aws:ResourceTag/Application}*:*"]
     }
   }
 
@@ -28,7 +31,7 @@ data "aws_iam_policy_document" "s3_sync" {
     condition {
       test     = "StringLike"
       variable = "${local.github_oidc_domain}:sub"
-      values   = ["repo:${local.github_org}/$${aws:ResourceTag/Application}:*"]
+      values   = ["repo:${local.github_org}*/$${aws:ResourceTag/Application}*:*"]
     }
   }
 }
