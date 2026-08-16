@@ -10,6 +10,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
+  BUCKET_NAME: aws-abac-tagging-bucket
 
 jobs:
   sync:
@@ -26,6 +27,6 @@ jobs:
 
       - name: Sync to S3
         run: |
-          aws s3 sync my-demo-bucket/ s3://aws-abac-tagging-bucket/ \
+          aws s3 sync my-demo-bucket/ s3://${{ env.BUCKET_NAME }}/ \
             --exclude "*.tf" \
             --exclude "*.tfvars"
