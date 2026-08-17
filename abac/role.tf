@@ -15,15 +15,17 @@ data "aws_iam_policy_document" "assume_role" {
     condition {
       test     = "StringLike"
       variable = "${local.github_oidc_domain}:sub"
-      values   = [local.reponame]
+      values   = local.allowed_ref_subs
     }
   }
 }
 
-# Single generic role, trusted by GitHub OIDC for the whole org. The `sub`
-# claim is session-available (per AWS's OIDC federation condition key docs),
-# so the S3 sync policy in policies.tf can compare it directly against the
-# target bucket's Application tag via a StringLike policy variable - no
+# Single generic role, trusted by GitHub OIDC for the whole org, restricted
+# per environment to either tag refs (production) or main/master pushes
+# (non-production) - see local.allowed_ref_subs. The `sub` claim is
+# session-available (per AWS's OIDC federation condition key docs), so the
+# S3 sync policy in policies.tf can compare it directly against the target
+# bucket's Application tag via a StringLike policy variable - no
 # role-chaining or session tagging required to get per-repo ABAC.
 resource "aws_iam_role" "this" {
   name               = "${local.name}-assume-role"

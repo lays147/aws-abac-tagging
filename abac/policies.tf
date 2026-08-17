@@ -6,6 +6,14 @@
 # Both the org and repo name segments carry a wildcard suffix because GitHub
 # appends an immutable numeric ID to each (e.g.
 # repo:lays147@7799231/my-repo@123:ref:...).
+#
+# The `environment` claim is a separate OIDC claim from `sub` - it's only
+# present when the calling GitHub Actions job sets `environment: <name>`
+# (see AWS's OIDC federation condition key docs). Comparing it against the
+# bucket's Environment tag via a StringEquals policy variable means the job
+# must be running in the GitHub environment that matches the target bucket's
+# Environment tag (which mirrors terraform.workspace) - not just the right
+# repo, but the right environment within that repo.
 data "aws_iam_policy_document" "s3_sync" {
   statement {
     sid    = "SyncObjects"
@@ -21,6 +29,11 @@ data "aws_iam_policy_document" "s3_sync" {
       variable = "${local.github_oidc_domain}:sub"
       values   = ["repo:${local.github_org}*/$${aws:ResourceTag/Application}*:*"]
     }
+    condition {
+      test     = "StringEquals"
+      variable = "${local.github_oidc_domain}:environment"
+      values   = ["$${aws:ResourceTag/Environment}"]
+    }
   }
 
   statement {
@@ -32,6 +45,11 @@ data "aws_iam_policy_document" "s3_sync" {
       test     = "StringLike"
       variable = "${local.github_oidc_domain}:sub"
       values   = ["repo:${local.github_org}*/$${aws:ResourceTag/Application}*:*"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${local.github_oidc_domain}:environment"
+      values   = ["$${aws:ResourceTag/Environment}"]
     }
   }
 }

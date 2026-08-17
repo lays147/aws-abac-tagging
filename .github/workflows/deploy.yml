@@ -3,6 +3,7 @@ name: Deploy demo bucket
 on:
   push:
     branches: [main]
+    tags: ["v*"]
 
 permissions:
   id-token: write
@@ -13,8 +14,40 @@ env:
   BUCKET_NAME: aws-abac-tagging-bucket
 
 jobs:
-  sync:
+  # Non-production: push to main. The `default` GitHub environment name must
+  # match the Environment tag of the target bucket (terraform.workspace in
+  # the non-production workspace - see abac/policies.tf's environment-claim
+  # condition), and the role's trust policy (abac/role.tf) only accepts this
+  # ref pattern (refs/heads/main) outside the production workspace.
+  sync-non-production:
+    if: github.ref_type == 'branch'
     runs-on: ubuntu-latest
+    environment: default
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assume role via OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3
+        run: |
+          aws s3 sync my-demo-bucket/ s3://${{ env.BUCKET_NAME }}/ \
+            --exclude "*.tf" \
+            --exclude "*.tfvars"
+
+  # Production: push of a `v*` tag. The `production` GitHub environment name
+  # must match the Environment tag of the target bucket (terraform.workspace
+  # == "production" - see abac/policies.tf's environment-claim condition),
+  # and the role's trust policy (abac/role.tf) only accepts tag refs
+  # (refs/tags/*) in the production workspace.
+  sync-production:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Checkout
         uses: actions/checkout@v4

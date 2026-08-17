@@ -7,14 +7,59 @@ Este repositório demonstra **ABAC (Attribute-Based Access Control)** na AWS usa
 ## Como funciona
 
 1. O GitHub Actions do repositório assume a IAM Role via **OIDC** (`sts:AssumeRoleWithWebIdentity`), sem credenciais de longa duração.
-2. A trust policy da Role confia em qualquer repositório da sua org/usuário do GitHub, definida em `local.github_org` (claim `sub` do token, com wildcard — ver seção abaixo).
-3. A policy de permissão anexada à Role (`s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:ListBucket`) só libera acesso a um bucket se a claim `sub` do token (que contém o nome do repo) bater com a tag `Application` do bucket, usando uma [policy variable](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_variables.html) (`${aws:ResourceTag/Application}`) dentro de uma condição `StringLike`.
+2. A trust policy da Role confia em qualquer repositório da sua org/usuário do GitHub, definida em `local.github_org` (claim `sub` do token, com wildcard — ver seção abaixo), **e** restringe o `ref` aceito de acordo com o ambiente (`terraform.workspace`) — ver [Restrição de ambiente](#restrição-de-ambiente-por-terraformworkspace) abaixo.
+3. A policy de permissão anexada à Role (`s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:ListBucket`) só libera acesso a um bucket se **duas** condições baterem ao mesmo tempo (`AND`): a claim `sub` do token (que contém o nome do repo) bater com a tag `Application` do bucket, e a claim `environment` do token (o [GitHub Environment](https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment) configurado no job) bater com a tag `Environment` do bucket — ambas usando [policy variables](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_variables.html) (`${aws:ResourceTag/Application}` / `${aws:ResourceTag/Environment}`) dentro de condições `StringLike`/`StringEquals`. Ver [Restrição por GitHub Environment](#restrição-por-github-environment) abaixo.
 4. O bucket (`my-demo-bucket/`) tem [ABAC habilitado a nível de bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/buckets-tagging-enable-abac.html) (`aws_s3_bucket_abac`), necessário para que `aws:ResourceTag` seja avaliado em ações de bucket como `ListBucket`.
 5. Um conjunto de tags (`CostCenter`, `Team`, `Application`, `Environment`) é o "contrato" de atributos usado tanto pela Role quanto pela SCP de guardrail (`abac/scp.tf`), que nega a criação de buckets sem essas tags.
 
 ### Formato da claim `sub` do GitHub
 
 O GitHub adicionou IDs numéricos imutáveis ao claim `sub` (ex.: `repo:sua-org@7799231/seu-repo@1335473687:ref:refs/heads/main`), além do formato antigo (`repo:sua-org/seu-repo:ref:...`). Os wildcards nas condições (`repo:${github_org}*/*`) cobrem os dois formatos sem duplicar policies — veja [Available keys for AWS OIDC federation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html#condition-keys-wif).
+
+### Restrição de ambiente por `terraform.workspace`
+
+Além do match org/repo, a trust policy da Role (`abac/role.tf`, `local.allowed_ref_subs` em `abac/locals.tf`) restringe **qual `ref` do GitHub pode assumir a Role**, com base no workspace do Terraform (`terraform.workspace`) — sem precisar de nenhuma variável extra, já que o ambiente é decidido pelo próprio workspace usado no `apply`:
+
+| Workspace | `local.is_production` | Refs aceitos na trust policy |
+| --- | --- | --- |
+| `production` | `true` | Somente **tags** git — `refs/tags/*` (ex.: releases `v1.2.3`) |
+| qualquer outro (`default`, `staging`, `dev`, ...) | `false` | Somente **push/branch** `main` ou `master` |
+
+Ou seja:
+
+- **Em produção**, só um `ref` de tag (`refs/tags/*`) consegue fazer `AssumeRoleWithWebIdentity` — um push direto em `main` no workspace `production` é rejeitado na trust policy, antes mesmo de chegar na policy ABAC de tags do bucket. Isso força o deploy em produção a passar por um processo de release (criar uma tag), não por qualquer push na branch principal.
+- **Fora de produção**, só um `ref` de branch `main` ou `master` consegue assumir a Role — pushes em outras branches ou tags são rejeitados. Isso mantém os ambientes de não-produção atrelados à branch principal, sem abrir para qualquer branch de feature.
+
+Essa restrição de `ref` é somada (`AND`, já que ambas as condições `StringLike` estão na mesma statement) à condição de `aud` já existente — ela não substitui, e não interfere, na condição ABAC de tags (`aws:ResourceTag/Application`) que continua controlando o acesso por repositório em `abac/policies.tf`.
+
+Para trocar de workspace localmente:
+
+```sh
+cd abac
+terraform workspace new production   # ou: terraform workspace select production
+mise exec -- terraform plan
+```
+
+> Nenhum outro recurso muda de comportamento com o workspace hoje além dessa condição de `ref` — as tags `Environment` (em `abac/locals.tf` e `my-demo-bucket/locals.tf`) já usavam `terraform.workspace` antes desta mudança.
+
+### Restrição por GitHub Environment
+
+Além da restrição de `ref` na trust policy, a **policy de permissão** `s3-sync` (`abac/policies.tf`) exige que o job do GitHub Actions esteja rodando dentro de um [GitHub Environment](https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment) (`environment:` no job) cujo **nome bata com a tag `Environment` do bucket**:
+
+```hcl
+condition {
+  test     = "StringEquals"
+  variable = "${local.github_oidc_domain}:environment"
+  values   = ["$${aws:ResourceTag/Environment}"]
+}
+```
+
+A claim `environment` é diferente da claim `sub` — ela só existe no token OIDC quando o job declara `environment: <nome>` no workflow (ver [Available keys for AWS OIDC federation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html#condition-keys-wif)); se o job não declarar nenhum `environment`, a claim não é emitida e essa condição falha (nega o acesso). Isso significa:
+
+- O nome do GitHub Environment usado no job **tem que ser literalmente igual** ao valor da tag `Environment` do bucket alvo, que por sua vez é `terraform.workspace` (`my-demo-bucket/locals.tf`). No workspace padrão isso é `default`; no workspace `production`, é `production`.
+- Essa condição é somada (`AND`) à condição existente de `sub`/tag `Application` — ou seja, o repositório certo já não basta: o job também precisa estar rodando no GitHub Environment com o nome certo.
+- No workflow deste repo (`.github/workflows/deploy.yml`), isso é implementado com dois jobs: `sync-non-production` (push em `main`, `environment: default`) e `sync-production` (push de tag `v*`, `environment: production`) — cada um casando com a mesma condição de `ref` da trust policy (seção anterior) e com o GitHub Environment correspondente.
+- [GitHub Environments](https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment) também podem ter suas próprias proteções (reviewers obrigatórios, branches/tags permitidas, secrets por ambiente) configuráveis em **Settings → Environments** no repositório — uma camada adicional de controle no lado do GitHub, complementar (não substitui) à condição ABAC do lado da AWS.
 
 ## Ativando a SCP (`scp_target_id`)
 
@@ -50,22 +95,22 @@ scp_target_id = "r-abc1"
 ```mermaid
 flowchart LR
     subgraph GH["GitHub"]
-        WF["GitHub Actions\n(push em main)"]
+        WF["GitHub Actions\nsync-non-production (push main, env default)\nsync-production (push tag v*, env production)"]
     end
 
     subgraph AWS["Conta AWS"]
         OIDC["OIDC Provider\ntoken.actions.githubusercontent.com"]
-        ROLE["IAM Role\ngithub-actions-assume-role\n(confia em repo:sua-org*/*)"]
-        POLICY["Policy s3-sync\nStringLike sub ==\nrepo:.../${aws:ResourceTag/Application}*"]
-        BUCKET["S3 Bucket\naws-abac-tagging-bucket\nTag Application=aws-abac-tagging\nABAC habilitado"]
+        ROLE["IAM Role\ngithub-actions-assume-role\n(confia em repo:sua-org*/*,\nref restrito por workspace)"]
+        POLICY["Policy s3-sync\nsub == repo.../${aws:ResourceTag/Application}*\nAND environment == ${aws:ResourceTag/Environment}"]
+        BUCKET["S3 Bucket\naws-abac-tagging-bucket\nTag Application=aws-abac-tagging\nTag Environment=terraform.workspace\nABAC habilitado"]
         SCP["SCP require-tags\n(nega criação sem\nCostCenter/Team/Application/Environment)"]
     end
 
-    WF -- "1. AssumeRoleWithWebIdentity\n(token OIDC)" --> OIDC
-    OIDC -- "2. valida aud + sub" --> ROLE
+    WF -- "1. AssumeRoleWithWebIdentity\n(token OIDC, claims sub+environment)" --> OIDC
+    OIDC -- "2. valida aud + sub (ref) + environment" --> ROLE
     ROLE -- "3. credenciais temporárias" --> WF
     WF -- "4. aws s3 sync" --> POLICY
-    POLICY -- "5. compara sub vs\ntag Application" --> BUCKET
+    POLICY -- "5. compara sub vs tag Application\ne environment vs tag Environment" --> BUCKET
     SCP -.-> BUCKET
 ```
 
@@ -80,7 +125,7 @@ flowchart LR
 
 ## Roteiro de teste
 
-Passo a passo para validar a SCP de tags obrigatórias e o ABAC de sync na prática. Pressupõe que `scp_target_id` já foi configurado (seção acima) e que `vars.ASSUME_ROLE_ARN` está definida no repositório do GitHub (Settings → Secrets and variables → Actions → Variables).
+Passo a passo para validar a SCP de tags obrigatórias e o ABAC de sync na prática. Pressupõe que `scp_target_id` já foi configurado (seção acima), que `vars.ASSUME_ROLE_ARN` está definida no repositório do GitHub (Settings → Secrets and variables → Actions → Variables), e que os **GitHub Environments** `default` e `production` existem no repositório (Settings → Environments → New environment) — sem eles, a claim `environment` não é emitida no token OIDC e o `s3 sync` é negado (ver [Restrição por GitHub Environment](#restrição-por-github-environment)).
 
 ### 1. Fazer um fork do repositório
 
@@ -151,13 +196,18 @@ Agora o `apply` deve passar — bucket criado com as quatro tags, ABAC habilitad
 
 ### 5. Fazer o deploy
 
-Dê `push` na branch `main` do seu fork (ou dispare manualmente pela aba **Actions** do GitHub, se o workflow tiver `workflow_dispatch`). O job deve completar com sucesso: assume a Role via OIDC e sincroniza `my-demo-bucket/` para o bucket, já que a claim `sub` do token (`repo:sua-org/aws-abac-tagging...`) bate com a tag `Application` do bucket.
+O workflow (`.github/workflows/deploy.yml`) tem dois jobs, cada um casando com o workspace usado para criar o bucket:
+
+- Se o bucket foi criado no workspace `default` (`terraform.workspace` = `default`, o padrão), dê `push` na branch `main` do seu fork. Isso dispara o job `sync-non-production` (`environment: default`, `ref` = `refs/heads/main`).
+- Se o bucket foi criado no workspace `production` (`terraform workspace select production` antes do `apply` em `abac/` e `my-demo-bucket/`), crie e dê push numa tag `v*`, por exemplo `git tag v0.1.0 && git push origin v0.1.0`. Isso dispara o job `sync-production` (`environment: production`, `ref` = `refs/tags/*`).
+
+Em ambos os casos, o job deve completar com sucesso: assume a Role via OIDC e sincroniza `my-demo-bucket/` para o bucket, já que a claim `sub` do token (`repo:sua-org/aws-abac-tagging...`) bate com a tag `Application` do bucket **e** a claim `environment` do job bate com a tag `Environment` do bucket.
 
 ### 6. Editar a tag `Application` no console (deve quebrar o próximo deploy)
 
 No console AWS: **S3 → aws-abac-tagging-bucket → Properties → Tags**, mude o valor de `Application` para algo diferente do nome do repositório, por exemplo `outro-valor`.
 
-Dispare o pipeline de novo (novo `push` em `main`, ou re-run do workflow) **sem alterar o Terraform**. O passo `aws s3 sync` deve falhar com:
+Dispare o pipeline de novo (novo `push` em `main`/tag `v*`, ou re-run do workflow) **sem alterar o Terraform**. O passo `aws s3 sync` deve falhar com:
 
 ```
 fatal error: An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied
@@ -165,7 +215,9 @@ fatal error: An error occurred (AccessDenied) when calling the ListObjectsV2 ope
 
 Isso acontece porque a condição `StringLike` da policy (`sub` do token vs. `${aws:ResourceTag/Application}`) não bate mais — a tag do bucket não corresponde ao repositório que está chamando, então o ABAC nega o acesso mesmo a Role sendo assumida com sucesso.
 
-> Para reverter, basta rodar `terraform apply` em `my-demo-bucket/` de novo — o Terraform detecta o drift na tag e a restaura para `aws-abac-tagging`, já que ela é gerenciada via `local.tags`.
+O mesmo tipo de falha acontece se você mudar a tag `Environment` do bucket para um valor que não bate com o GitHub Environment do job (`default`/`production`) — a condição `StringEquals` da claim `environment` passa a negar o acesso mesmo com a tag `Application` correta.
+
+> Para reverter, basta rodar `terraform apply` em `my-demo-bucket/` de novo — o Terraform detecta o drift na tag e a restaura, já que ela é gerenciada via `local.tags`.
 
 ## Referências
 
