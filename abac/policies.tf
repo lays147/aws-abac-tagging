@@ -1,19 +1,24 @@
-# The `sub` claim (repo:<org>/<repo>:ref:refs/heads/<branch>) is available in
-# the role session (see AWS's OIDC federation condition key docs), so it can
-# be compared directly against a resource tag using a StringLike policy
-# variable - matching the calling repository's name against the bucket's
-# Application tag without needing a second role or session tags.
+# The `sub` claim is available in the role session (see AWS's OIDC federation
+# condition key docs - it's the only GitHub claim marked "Available in
+# session: Yes"), so it can be compared directly against resource tags using
+# a StringLike policy variable - no session tags or role-chaining needed.
 # Both the org and repo name segments carry a wildcard suffix because GitHub
 # appends an immutable numeric ID to each (e.g.
-# repo:lays147@7799231/my-repo@123:ref:...).
+# repo:lays147@7799231/my-repo@123:...).
 #
-# The `environment` claim is a separate OIDC claim from `sub` - it's only
-# present when the calling GitHub Actions job sets `environment: <name>`
-# (see AWS's OIDC federation condition key docs). Comparing it against the
-# bucket's Environment tag via a StringEquals policy variable means the job
-# must be running in the GitHub environment that matches the target bucket's
-# Environment tag (which mirrors terraform.workspace) - not just the right
-# repo, but the right environment within that repo.
+# `ref` and `environment` are NOT session-available on their own (see
+# abac/role.tf's comment), so they can't be used as separate condition keys
+# here. But every job in this repo's workflow sets `environment:`, which
+# means GitHub puts the environment name directly into `sub`'s suffix as
+# `:environment:<name>` (instead of `:ref:<ref>`, which only appears when a
+# job has no `environment:`) - see the CloudTrail principalId this pattern
+# was derived from:
+#   repo:lays147@<id>/aws-abac-tagging@<id>:environment:default
+# So the environment can be enforced here too, by extending the `sub`
+# pattern to require that suffix match the bucket's Environment tag as a
+# second policy variable in the same StringLike condition. This only works
+# because every job declares `environment:` - a job that didn't would get
+# a `:ref:...` suffix instead and always fail this pattern (fail closed).
 data "aws_iam_policy_document" "s3_sync" {
   statement {
     sid    = "SyncObjects"
@@ -27,12 +32,7 @@ data "aws_iam_policy_document" "s3_sync" {
     condition {
       test     = "StringLike"
       variable = "${local.github_oidc_domain}:sub"
-      values   = ["repo:${local.github_org}*/$${aws:ResourceTag/Application}*:*"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "${local.github_oidc_domain}:environment"
-      values   = ["$${aws:ResourceTag/Environment}"]
+      values   = ["repo:${local.github_org}*/$${aws:ResourceTag/Application}*:environment:$${aws:ResourceTag/Environment}"]
     }
   }
 
@@ -44,12 +44,7 @@ data "aws_iam_policy_document" "s3_sync" {
     condition {
       test     = "StringLike"
       variable = "${local.github_oidc_domain}:sub"
-      values   = ["repo:${local.github_org}*/$${aws:ResourceTag/Application}*:*"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "${local.github_oidc_domain}:environment"
-      values   = ["$${aws:ResourceTag/Environment}"]
+      values   = ["repo:${local.github_org}*/$${aws:ResourceTag/Application}*:environment:$${aws:ResourceTag/Environment}"]
     }
   }
 }

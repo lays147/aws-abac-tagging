@@ -13,17 +13,26 @@ locals {
 
   is_production = terraform.workspace == "production"
 
-  # Restricts which git ref can assume the role, on top of the org/repo match
-  # above. Production releases are cut as git tags, so the `production`
-  # workspace only trusts tag refs (any refs/tags/*, since the sub claim
-  # can't tell which branch a tag was cut from). Every other workspace only
-  # trusts pushes to main or master.
-  allowed_ref_subs = local.is_production ? (
-    ["${local.reponame}:ref:refs/tags/*"]
+  # GitHub's OIDC `sub` claim's trailing segment depends on whether the
+  # calling job sets `environment:` - if it does (ours all do, so the
+  # environment claim below is populated for policies.tf), `sub` ends in
+  # `:environment:<name>` instead of `:ref:<ref>`. `ref` and `environment`
+  # are still available as their own separate, independently-populated
+  # condition keys regardless of that (see AWS's OIDC federation condition
+  # key docs), so ref restriction is expressed as its own StringLike
+  # condition (allowed_refs) rather than folded into the sub pattern.
+  allowed_environment = local.is_production ? "production" : "default"
+
+  # Production releases are cut as git tags, so the `production` workspace
+  # only trusts tag refs (any refs/tags/*, since a tag ref alone can't tell
+  # which branch it was cut from). Every other workspace only trusts pushes
+  # to main or master.
+  allowed_refs = local.is_production ? (
+    ["refs/tags/*"]
     ) : (
     [
-      "${local.reponame}:ref:refs/heads/main",
-      "${local.reponame}:ref:refs/heads/master",
+      "refs/heads/main",
+      "refs/heads/master",
     ]
   )
 
